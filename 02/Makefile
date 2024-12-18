@@ -22,7 +22,9 @@ gpu: $(GPU_SRC)
 clean:
 	rm -f $(TARGET)
 
-# Run rules
-run_mode:
-	./$(TARGET)
+run_cpu:
+	./$(TARGET) cpu
+
+run_gpu:
+	./$(TARGET) gpu
 
