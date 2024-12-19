@@ -8,7 +8,7 @@ NVCCFLAGS = -O2 -arch=sm_60
 TARGET = cuda2
 
 # Source files
-GPU_SRC = jac3d_cuda2.cu
+GPU_SRC = jac3d_cuda.cu
 
 # Build rules
 all: build
