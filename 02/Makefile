@@ -5,7 +5,7 @@ NVCC = nvcc
 NVCCFLAGS = -O2 -arch=sm_60
 
 # Output binary
-TARGET = cuda2
+TARGET = cuda
 
 # Source files
 GPU_SRC = adi3d_cuda.cu

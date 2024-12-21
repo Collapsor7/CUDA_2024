@@ -5,20 +5,17 @@
 #include <time.h>
 #include <string.h>
 
-#define Max(a, b) fmax(a,b)
-#define BLOCKSIZE 4
+#define Max(a, b) fmax(a, b)
+#define BLOCKSIZE 8 
+
 
 void init(double *a, int L);
 void runOnCPU(double *a, int itmax, double maxeps, double *elapsedTime, int L);
-void runOnGPU(double *a, int itmax, double maxeps, double *elapsedTime, int L);
-void runOnGPU_double_buffering(double *a, int itmax, double maxeps, double *elapsedTime, int L);
+void runOnGPU_GaussSeidel(double *a, int itmax, double maxeps, double *elapsedTime, int L);
 
-__global__ void kernel_update(double *a, double *eps_d, int L);
-__global__ void kernel_update_i(double *a, int L);
-__global__ void kernel_update_j(double *a, int L);
-__global__ void kernel_update_k(double *a, double *eps_d, int L);
-__global__ void kernel_update_all(double *a_old, double *a_new, double *eps_d, int L);
-
+__global__ void kernel_update_i(double *a_new, double *a_old, int L, int i_layer);
+__global__ void kernel_update_j(double *a_new, double *a_old, int L, int j_layer);
+__global__ void kernel_update_k(double *a_new, double *a_old, double *eps_d, int L, int k_layer);
 __device__ double atomicMaxDouble(double* addr, double value);
 
 int main(int argc, char *argv[])
@@ -59,10 +56,9 @@ int main(int argc, char *argv[])
     printf("Free memory: %zu bytes\n", free_mem);
     printf("Total memory: %zu bytes\n", total_mem);
 
-
-    int L = (int)pow((free_mem * 0.8 / (2 * sizeof(double))), 1.0 / 3.0); 
+    int L = (int)pow((free_mem * 0.8 / (3 * sizeof(double))), 1.0 / 3.0); 
     printf("Dynamic grid size set to: %d x %d x %d\n", L, L, L);
-
+    //L = 4; 
 
     cudaStatus = cudaMallocHost((void **)&a, L * L * L * sizeof(double));
     if (cudaStatus != cudaSuccess)
@@ -72,21 +68,19 @@ int main(int argc, char *argv[])
     }
     init(a, L);
 
-
     if (strcmp(argv[1], "cpu") == 0)
     {
         runOnCPU(a, itmax, maxeps, &elapsedTime, L);
     }
     else if (strcmp(argv[1], "gpu") == 0)
     {
-        runOnGPU(a, itmax, maxeps, &elapsedTime, L);
-        //runOnGPU_double_buffering(a, itmax, maxeps, &elapsedTime, L);
+        runOnGPU_GaussSeidel(a, itmax, maxeps, &elapsedTime, L);
     }
 
     printf("ADI Benchmark Completed.\n");
     printf("Size            = %4d x %4d x %4d\n", L, L, L);
     printf("Iterations      =       %12d\n", itmax);
-    printf("Time in seconds =       %12.2lf\n", elapsedTime);
+    printf("Time in seconds =       %12.6lf\n", elapsedTime);
     printf("Operation type  =   double precision\n");
     printf("END OF ADI Benchmark\n");
 
@@ -103,7 +97,7 @@ void init(double *a, int L)
                 if (k == 0 || k == L - 1 || j == 0 || j == L - 1 || i == 0 || i == L - 1)
                     a[i * L * L + j * L + k] = 10.0 * i / (L - 1) + 10.0 * j / (L - 1) + 10.0 * k / (L - 1);
                 else
-                    a[i * L * L + j * L + k] = 0;
+                    a[i * L * L + j * L + k] = 0.0;
             }
 }
 
@@ -127,74 +121,209 @@ __device__ double atomicMaxDouble(double* addr, double value)
     return __longlong_as_double(old);
 }
 
-__global__ void kernel_update_i(double *a, int L)
+__global__ void kernel_update_i(double *a_new, double *a_old, int L, int i_layer)
 {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
-    int j = blockIdx.y * blockDim.y + threadIdx.y;
-    int k = blockIdx.z * blockDim.z + threadIdx.z;
+    int j = blockIdx.x * blockDim.x + threadIdx.x;
+    int k = blockIdx.y * blockDim.y + threadIdx.y;
 
-    if (i > 0 && i < L - 1 && j > 0 && j < L - 1 && k > 0 && k < L - 1)
+    if (i_layer > 0 && i_layer < L - 1 && j > 0 && j < L - 1 && k > 0 && k < L - 1)
     {
-        a[i * L * L + j * L + k] = (a[(i - 1) * L * L + j * L + k] + a[(i + 1) * L * L + j * L + k]) / 2.0;
+        a_new[i_layer * L * L + j * L + k] = (a_new[(i_layer - 1) * L * L + j * L + k] + a_old[(i_layer + 1) * L * L + j * L + k]) / 2.0;
+        //printf("a[%d,%d,%d]=%.6lf\n",i_layer-1,j,k,a_new[(i_layer - 1) * L * L + j * L + k]);
+        //printf("a[%d,%d,%d]=%.6lf\n",i_layer+1,j,k,a_old[(i_layer + 1) * L * L + j * L + k]);
+        //printf("kernel_update_i: i=%d, j=%d, k=%d, a_new=%.6lf\n", i_layer, j, k, a_new[i_layer * L * L + j * L + k]);
     }
-    __syncthreads();
 }
 
-__global__ void kernel_update_j(double *a, int L)
+__global__ void kernel_update_j(double *a_new, double *a_old, int L, int j_layer)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
-    int j = blockIdx.y * blockDim.y + threadIdx.y;
-    int k = blockIdx.z * blockDim.z + threadIdx.z;
+    int k = blockIdx.y * blockDim.y + threadIdx.y;
 
-    if (i > 0 && i < L - 1 && j > 0 && j < L - 1 && k > 0 && k < L - 1)
+    if (i > 0 && i < L - 1 && k > 0 && k < L - 1)
     {
-        a[i * L * L + j * L + k] = (a[i * L * L + (j - 1) * L + k] + a[i * L * L + (j + 1) * L + k]) / 2.0;
+        a_new[i * L * L + j_layer * L + k] = (a_new[i * L * L + (j_layer-1) * L + k] + a_old[i * L * L + (j_layer+1) * L + k]) / 2.0;
+       // printf("a[%d,%d,%d]=%.6lf\n",i, j_layer-1,k,a_new[i * L * L + (j_layer-1) * L + k]);
+        //printf("a[%d,%d,%d]=%.6lf\n",i, j_layer+1,k,a_old[i * L * L + (j_layer+1) * L + k]);
+        //printf("kernel_update_j: i=%d, j=%d, k=%d, a_new=%.6lf\n", i, j_layer, k, a_new[i * L * L + j_layer * L + k]);
     }
-    __syncthreads();
 }
 
-__global__ void kernel_update_k(double *a, double *eps_d, int L)
+__global__ void kernel_update_k(double *a_new, double *a_old, double *eps_d, int L, int k_layer)
 {
     int i = blockIdx.x * blockDim.x + threadIdx.x;
     int j = blockIdx.y * blockDim.y + threadIdx.y;
-    int k = blockIdx.z * blockDim.z + threadIdx.z;
+
+    extern __shared__ double shared_eps[];
 
     double local_eps = 0.0;
 
-    __shared__ double shared_eps[BLOCKSIZE*BLOCKSIZE*BLOCKSIZE]; 
-    int threadId = threadIdx.x + threadIdx.y * blockDim.x + threadIdx.z * blockDim.x * blockDim.y;
-    shared_eps[threadId] = 0.0;
 
-    if (i > 0 && i < L - 1 && j > 0 && j < L - 1 && k > 0 && k < L - 1)
+    if (i> 0 && i < L - 1 && j > 0 && j < L - 1)
     {
-        double tmp = (a[i * L * L + j * L + (k - 1)] + a[i * L * L + j * L + (k + 1)]) / 2.0;
-        double diff = fabs(a[i * L * L + j * L + k] - tmp);
-        a[i * L * L + j * L + k] = tmp;
-        //atomicMax((unsigned long long int *)eps_d,__double_as_longlong(local_eps));
-        //printf("GPU_temp : %f \n",tmp);
-        //atomicMaxDouble(eps_d, max_eps_in_block);
-        local_eps = Max(diff,local_eps);
-      
+        double tmp = (a_new[i * L * L + j * L + (k_layer - 1)] + a_old[i * L * L + j * L + (k_layer + 1)]) / 2.0;
+        double diff = fabs(a_old[i * L * L + j * L + k_layer] - tmp);
+        a_new[i * L * L + j * L + k_layer] = tmp;
+        local_eps = Max(diff, local_eps);
+        //printf("a[%d,%d,%d]=%.6lf\n",i,j,k_layer-1,a_new[i * L * L + j * L + (k_layer-1)]);
+        //printf("a[%d,%d,%d]=%.6lf\n",i,j,k_layer+1,a_old[i * L * L + j * L + (k_layer+1)]);
+        //printf("kernel_update_k: i=%d, j=%d, k=%d, a_new=%.6lf, diff=%.6lf\n", i, j, k_layer, tmp, diff);
     }
-    __syncthreads(); 
 
-    shared_eps[threadId] = local_eps;
+    int threadId = threadIdx.x + threadIdx.y * blockDim.x;
+    if (i < L && j < L)
+        shared_eps[threadId] = local_eps;
+    else
+        shared_eps[threadId] = 0.0;
+    __syncthreads();
 
-    __syncthreads(); 
-
-    if (threadId == 0){
-        double max_eps_in_block = local_eps;
-        for (int idx = 0; idx < blockDim.x * blockDim.y * blockDim.z; ++idx)
+    for (int stride = (blockDim.x * blockDim.y) / 2; stride > 0; stride >>= 1)
+    {
+        if (threadId < stride)
         {
-            max_eps_in_block = Max(max_eps_in_block, shared_eps[idx]);
+            shared_eps[threadId] = Max(shared_eps[threadId], shared_eps[threadId + stride]);
         }
-        //atomicMaxDouble(eps_d, max_eps_in_block);
-        atomicMax((unsigned long long int *)eps_d,__double_as_longlong(max_eps_in_block));
+        __syncthreads();
     }
-        
-        //__syncthreads(); 
-        //printf(max_eps_in_block);
-        //atomicMax((unsigned long long int *)eps_d,__double_as_longlong(max_eps_in_block));        
+
+    if (threadId == 0)
+    {
+        atomicMaxDouble(eps_d, shared_eps[0]);
+    }
+}
+
+void runOnGPU_GaussSeidel(double *a, int itmax, double maxeps, double *elapsedTime, int L)
+{
+    double *a_old, *a_new, *eps_d, eps;
+    cudaError_t cudaStatus;
+
+    cudaStatus = cudaMalloc(&a_old, L * L * L * sizeof(double));
+    if (cudaStatus != cudaSuccess)
+    {
+        fprintf(stderr, "cudaMalloc a_old failed! Error: %s\n", cudaGetErrorString(cudaStatus));
+        return;
+    }
+
+    cudaStatus = cudaMalloc(&a_new, L * L * L * sizeof(double));
+    if (cudaStatus != cudaSuccess)
+    {
+        fprintf(stderr, "cudaMalloc a_new failed! Error: %s\n", cudaGetErrorString(cudaStatus));
+        cudaFree(a_old);
+        return;
+    }
+
+    cudaStatus = cudaMalloc(&eps_d, sizeof(double));
+    if (cudaStatus != cudaSuccess)
+    {
+        fprintf(stderr, "cudaMalloc eps_d failed! Error: %s\n", cudaGetErrorString(cudaStatus));
+        cudaFree(a_old);
+        cudaFree(a_new);
+        return;
+    }
+
+    cudaStatus = cudaMemcpy(a_old, a, L * L * L * sizeof(double), cudaMemcpyHostToDevice);
+    if (cudaStatus != cudaSuccess)
+    {
+        fprintf(stderr, "cudaMemcpy to a_old failed! Error: %s\n", cudaGetErrorString(cudaStatus));
+        cudaFree(a_old);
+        cudaFree(a_new);
+        cudaFree(eps_d);
+        return;
+    }
+
+
+    cudaStatus = cudaMemcpy(a_new, a_old, L * L * L * sizeof(double), cudaMemcpyDeviceToDevice);
+    if (cudaStatus != cudaSuccess)
+    {
+        fprintf(stderr, "cudaMemcpy to a_new failed! Error: %s\n", cudaGetErrorString(cudaStatus));
+        cudaFree(a_old);
+        cudaFree(a_new);
+        cudaFree(eps_d);
+        return;
+    }
+
+
+    dim3 threads(BLOCKSIZE, BLOCKSIZE, 1); 
+    dim3 blocks((L + threads.x - 1) / threads.x, 
+                (L + threads.y - 1) / threads.y, 
+                1);
+
+    cudaEvent_t start, stop;
+    cudaEventCreate(&start);
+    cudaEventCreate(&stop);
+    cudaEventRecord(start);
+
+    for (int it = 1; it <= itmax; it++)
+    {
+
+        cudaStatus = cudaMemset(eps_d, 0, sizeof(double));
+        if (cudaStatus != cudaSuccess)
+        {
+            fprintf(stderr, "cudaMemset eps_d failed! Error: %s\n", cudaGetErrorString(cudaStatus));
+            break;
+        }
+
+        for (int i = 1; i < L - 1; i++)
+        {
+            kernel_update_i<<<blocks, threads>>>(a_new, a_old, L, i);
+            cudaStatus = cudaDeviceSynchronize();
+            if (cudaStatus != cudaSuccess)
+            {
+                fprintf(stderr, "kernel_update_i failed! Error: %s\n", cudaGetErrorString(cudaStatus));
+                break;
+            }
+        }
+        for (int i = 1; i < L - 1; i++)
+        {
+            kernel_update_j<<<blocks, threads>>>(a_old, a_new, L, i);
+            cudaStatus = cudaDeviceSynchronize();
+            if (cudaStatus != cudaSuccess)
+            {
+                fprintf(stderr, "kernel_update_j failed! Error: %s\n", cudaGetErrorString(cudaStatus));
+                break;
+            }
+        }
+
+        for (int i = 1; i < L - 1; i++)
+        {
+
+            size_t sharedMemSize = threads.x * threads.y * sizeof(double);
+            kernel_update_k<<<blocks, threads, sharedMemSize>>>(a_new, a_old, eps_d, L, i);
+            cudaStatus = cudaDeviceSynchronize();
+            if (cudaStatus != cudaSuccess)
+            {
+                fprintf(stderr, "kernel_update_k failed! Error: %s\n", cudaGetErrorString(cudaStatus));
+                break;
+            }
+        }
+
+        cudaStatus = cudaMemcpy(&eps, eps_d, sizeof(double), cudaMemcpyDeviceToHost);
+        if (cudaStatus != cudaSuccess)
+        {
+            fprintf(stderr, "cudaMemcpy from eps_d failed! Error: %s\n", cudaGetErrorString(cudaStatus));
+            break;
+        }
+
+        printf("GPU IT = %4d   EPS = %14.7E \n", it, eps);
+        if (eps < maxeps) break;
+
+
+        double *temp = a_old;
+        a_old = a_new;
+        a_new = temp;
+    }
+
+    cudaEventRecord(stop);
+    cudaEventSynchronize(stop);
+    float gpuTime = 0.0f;
+    cudaEventElapsedTime(&gpuTime, start, stop);
+    *elapsedTime = (double)(gpuTime) / 1000.0; 
+
+    cudaFree(a_old);
+    cudaFree(a_new);
+    cudaFree(eps_d);
+    cudaEventDestroy(start);
+    cudaEventDestroy(stop);
 }
 
 void runOnCPU(double *a, int itmax, double maxeps, double *elapsedTime, int L)
@@ -207,21 +336,33 @@ void runOnCPU(double *a, int itmax, double maxeps, double *elapsedTime, int L)
         for (int i = 1; i < L - 1; i++)
             for (int j = 1; j < L - 1; j++)
                 for (int k = 1; k < L - 1; k++)
-                    a[i * L * L + j * L + k] = (a[(i - 1) * L * L + j * L + k] + a[(i + 1) * L * L + j * L + k]) / 2;
-
-        for (int i = 1; i < L - 1; i++)
-            for (int j = 1; j < L - 1; j++)
-                for (int k = 1; k < L - 1; k++)
-                    a[i * L * L + j * L + k] = (a[i * L * L + (j - 1) * L + k] + a[i * L * L + (j + 1) * L + k]) / 2;
+                {
+                    a[i * L * L + j * L + k] = (a[(i - 1) * L * L + j * L + k] + a[(i + 1) * L * L + j * L + k]) / 2.0;
+                    //printf("a[%d,%d,%d]=%.6lf \n",i-1,j,k,a[(i-1) * L * L + j * L + k]);
+                    //printf("a[%d,%d,%d]=%.6lf \n",i+1,j,k,a[(i+1) * L * L + j * L + k]);
+                    //printf("current_i_thread, i = %d, j = %d, k = %d, a = %.6f.\n",i,j,k,a[i * L * L + j * L + k]);
+                }
 
         for (int i = 1; i < L - 1; i++)
             for (int j = 1; j < L - 1; j++)
                 for (int k = 1; k < L - 1; k++)
                 {
-                    double tmp = (a[i * L * L + j * L + (k - 1)] + a[i * L * L + j * L + (k + 1)]) / 2;
+                    a[i * L * L + j * L + k] = (a[i * L * L + (j - 1) * L + k] + a[i * L * L + (j + 1) * L + k]) / 2.0;
+                    //printf("a[%d,%d,%d]=%.6lf \n",i,j-1,k,a[i * L * L + (j-1) * L + k]);
+                    //printf("a[%d,%d,%d]=%.6lf \n",i,j+1,k,a[i * L * L + (j+1) * L + k]);
+                    //printf("current_j_thread, i = %d, j = %d, k = %d, a = %.6f.\n",i,j,k,a[i * L * L + j * L + k]);
+                }
+
+        for (int i = 1; i < L - 1; i++)
+            for (int j = 1; j < L - 1; j++)
+                for (int k = 1; k < L - 1; k++)
+                {
+                    double tmp = (a[i * L * L + j * L + (k - 1)] + a[i * L * L + j * L + (k + 1)]) / 2.0;
                     eps = Max(eps, fabs(a[i * L * L + j * L + k] - tmp));
                     a[i * L * L + j * L + k] = tmp;
-                    //printf("CPU_temp : %f \n",tmp);
+                    //printf("a[%d,%d,%d]=%.6lf \n",i,j,k-1,a[i * L * L + j * L + (k-1)]);
+                    //printf("a[%d,%d,%d]=%.6lf \n",i,j,k+1,a[i * L * L + j * L + (k+1)]);
+                    //printf("current_k_thread, i = %d, j = %d, k = %d, a = %.6f, diff = %.6f.\n",i,j,k,a[i * L * L + j * L + k],eps);
                 }
 
         printf(" CPU IT = %4d   EPS = %14.7E\n", it, eps);
@@ -230,87 +371,5 @@ void runOnCPU(double *a, int itmax, double maxeps, double *elapsedTime, int L)
     }
     clock_t end = clock();
     *elapsedTime = (double)(end - start) / CLOCKS_PER_SEC;
-}
-
-
-void runOnGPU(double *a, int itmax, double maxeps, double *elapsedTime, int L)
-{
-    double *a_d, *eps_d, eps;
-    cudaError_t cudaStatus;
-
-    cudaStatus = cudaMalloc(&a_d, L * L * L * sizeof(double));
-    if (cudaStatus != cudaSuccess)
-    {
-        fprintf(stderr, "cudaMalloc a_d failed! Error: %s\n", cudaGetErrorString(cudaStatus));
-        return;
-    }
-
-    cudaStatus = cudaMalloc(&eps_d, sizeof(double));
-    if (cudaStatus != cudaSuccess)
-    {
-        fprintf(stderr, "cudaMalloc eps_d failed! Error: %s\n", cudaGetErrorString(cudaStatus));
-        cudaFree(a_d);
-        return;
-    }
-
-    cudaStatus = cudaMemcpy(a_d, a, L * L * L * sizeof(double), cudaMemcpyHostToDevice);
-    if (cudaStatus != cudaSuccess)
-    {
-        fprintf(stderr, "cudaMemcpy to a_d failed! Error: %s\n", cudaGetErrorString(cudaStatus));
-        cudaFree(a_d);
-        cudaFree(eps_d);
-        return;
-    }
-
-    dim3 threads(BLOCKSIZE,BLOCKSIZE,BLOCKSIZE);
-    dim3 blocks((L + threads.x - 1) / threads.x, 
-                (L + threads.y - 1) / threads.y, 
-                (L + threads.z - 1) / threads.z);
-
-
-    cudaEvent_t start, stop;
-    cudaEventCreate(&start);
-    cudaEventCreate(&stop);
-    cudaEventRecord(start);
-
-    for (int it = 1; it <= itmax; it++)
-    {
- 
-        cudaStatus = cudaMemset(eps_d, 0, sizeof(double));
-
-        kernel_update_i<<<blocks, threads>>>(a_d, L);
-        cudaStatus = cudaDeviceSynchronize();
-        cudaStatus = cudaGetLastError();
-
-
-        kernel_update_j<<<blocks, threads>>>(a_d, L);
-        cudaStatus = cudaDeviceSynchronize();
-        cudaStatus = cudaGetLastError();
-
-
-        kernel_update_k<<<blocks, threads>>>(a_d, eps_d, L);
-        //kernel_update<<<blocks, threads>>>(a_d,eps_d, L);
-        cudaStatus = cudaDeviceSynchronize();
-        cudaStatus = cudaGetLastError();
- 
-        cudaStatus = cudaMemcpy(&eps, eps_d, sizeof(double), cudaMemcpyDeviceToHost);
-        cudaStatus = cudaDeviceSynchronize();
-
-        printf("GPU IT = %4d   EPS = %14.7E \n", it, eps);
-        if (eps < maxeps) break;
-        
-    }
-
-
-    cudaEventRecord(stop);
-    cudaEventSynchronize(stop);
-    float gpuTime = 0.0f;
-    cudaEventElapsedTime(&gpuTime, start, stop);
-    *elapsedTime = (double)(gpuTime) / 1000.0; 
-
-    cudaFree(a_d);
-    cudaFree(eps_d);
-    cudaEventDestroy(start);
-    cudaEventDestroy(stop);
 }
 
